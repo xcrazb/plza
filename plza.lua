@@ -25,46 +25,63 @@ local PriceByType, TypeList, isRunning = {}, {}, false
 local GUI, scrollContent, startBtn, stateLbl, tokenLbl, afkLbl
 local liveLabels, rowFrames = {}, {}
 
--- Helper: Ambil Token Player
-local function getTokens()
-    local pd = getPlayerDataById(tostring(DEFAULT_USER_ID))
-    if not pd then return 0 end
-    return pd.tokens or pd.currency and pd.currency.tokens or pd.tokenBalance or 0
-end
+-- ============================================================
+-- WEBHOOK QUEUE SYSTEM (Mencegah Loop Macet)
+-- ============================================================
+local webhookQueue = {}
+local isProcessingWebhook = false
 
--- Helper: Kirim Webhook (Anti-Freeze / Timeout)
-local function sendWebhook(petName)
-    if WEBHOOK_URL == "" or WEBHOOK_URL:find("XXXXXX") then return end
+local function processWebhookQueue()
+    if isProcessingWebhook then return end
+    isProcessingWebhook = true
     
     task.spawn(function()
-        local currentTokens = getTokens()
-        local data = {
-            ["content"] = "💰 **PET TERJUAL!**",
-            ["embeds"] = {{
-                ["color"] = 65280,
-                ["fields"] = {
-                    {["name"] = "🐾 Jenis Pet", ["value"] = tostring(petName), ["inline"] = true},
-                    {["name"] = "💎 Total Token", ["value"] = tostring(currentTokens), ["inline"] = true}
-                },
-                ["footer"] = {["text"] = "Auto Re-Listing System"}
-            }}
-        }
-        
-        local jsonData = HttpService:JSONEncode(data)
-        
-        -- pcall membungkus request agar jika Discord timeout, script tidak macet
-        pcall(function()
-            request({
-                Url = WEBHOOK_URL,
-                Method = "POST",
-                Headers = {["Content-Type"] = "application/json"},
-                Body = jsonData
-            })
-        end)
+        while #webhookQueue > 0 do
+            local petName = table.remove(webhookQueue, 1)
+            
+            -- Ambil token terbaru
+            local pd = getPlayerDataById(tostring(DEFAULT_USER_ID))
+            local currentTokens = pd and (pd.tokens or pd.currency and pd.currency.tokens or pd.tokenBalance) or 0
+            
+            local data = {
+                ["content"] = "💰 **PET TERJUAL!**",
+                ["embeds"] = {{
+                    ["color"] = 65280,
+                    ["fields"] = {
+                        {["name"] = "🐾 Jenis Pet", ["value"] = tostring(petName), ["inline"] = true},
+                        {["name"] = "💎 Total Token", ["value"] = tostring(currentTokens), ["inline"] = true}
+                    },
+                    ["footer"] = {["text"] = "Auto Re-Listing System"}
+                }}
+            }
+            
+            local jsonData = HttpService:JSONEncode(data)
+            
+            -- Kirim dengan timeout 5 detik (jika lebih, lanjut antrean berikutnya)
+            local success = pcall(function()
+                request({
+                    Url = WEBHOOK_URL,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = jsonData
+                })
+            end)
+            
+            task.wait(1) -- Jeda antar webhook agar Discord tidak nge-spam
+        end
+        isProcessingWebhook = false
     end)
 end
 
--- 3. Core Logic (Anti-Stuck)
+local function queueWebhook(petName)
+    if WEBHOOK_URL == "" or WEBHOOK_URL:find("XXXXXX") then return end
+    table.insert(webhookQueue, petName)
+    processWebhookQueue() -- Jalankan antrean di background
+end
+
+-- ============================================================
+-- 3. Core Logic (Dengan Watchdog Timer)
+-- ============================================================
 local function runRelistLoop()
     local typeQueues = {}
     for _, entry in ipairs(TypeList) do
@@ -90,7 +107,7 @@ local function runRelistLoop()
         if item then
             MAKE_LISTING:FireServer("pet", item.uid, item.price)
             activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
-            task.wait(0.5)
+            task.wait(0.8)
         end
     end
 
@@ -98,7 +115,7 @@ local function runRelistLoop()
     if stateLbl then stateLbl.Text = "🟢 Memantau Inventory..." end
 
     while isRunning do
-        task.wait(2)
+        task.wait(1.5) -- Pengecekan lebih responsif
         if not isRunning then break end
 
         local petsData = resolve(Inv.petsData)
@@ -111,14 +128,23 @@ local function runRelistLoop()
                     activeListingUIDs[uid] = nil
                     hasSold = true
                     
-                    sendWebhook(info.petType)
+                    -- Masukkan ke antrean webhook (tidak akan menghentikan script)
+                    queueWebhook(info.petType)
 
                     local queue = typeQueues[info.petType]
                     if queue and #queue > 0 then
                         local nextItem = table.remove(queue, 1)
-                        MAKE_LISTING:FireServer("pet", nextItem.uid, nextItem.price)
-                        activeListingUIDs[nextItem.uid] = { petType = nextItem.petType, price = nextItem.price }
-                        task.wait(1)
+                        
+                        -- WATCHDOG: Kirim dan tunggu maksimal 2 detik, jika tidak ada respon lanjut saja
+                        local ok, err = pcall(function()
+                            MAKE_LISTING:FireServer("pet", nextItem.uid, nextItem.price)
+                        end)
+                        
+                        if ok then
+                            activeListingUIDs[nextItem.uid] = { petType = nextItem.petType, price = nextItem.price }
+                        end
+                        
+                        task.wait(1) -- Jeda aman
                     end
                 end
             end
@@ -221,7 +247,7 @@ local function buildGUI()
 
     local titleText = Instance.new("TextLabel", titleBar)
     titleText.Size, titleText.Position, titleText.BackgroundTransparency = UDim2.new(1, -50, 1, 0), UDim2.new(0, 15, 0, 0), 1
-    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing + Anti-AFK", Color3.new(1,1,1), Enum.TextXAlignment.Left
+    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing (Anti-Stuck)", Color3.new(1,1,1), Enum.TextXAlignment.Left
 
     local closeBtn = Instance.new("TextButton", titleBar)
     closeBtn.Size, closeBtn.Position = UDim2.new(0, 30, 0, 30), UDim2.new(1, -38, 0, 5)
@@ -250,7 +276,9 @@ local function buildGUI()
     task.spawn(function()
         while GUI and GUI.Parent do
             if tokenLbl and tokenLbl.Parent then
-                tokenLbl.Text = "💰 Tokens: " .. tostring(getTokens())
+                local pd = getPlayerDataById(tostring(DEFAULT_USER_ID))
+                local tk = pd and (pd.tokens or pd.currency and pd.currency.tokens or pd.tokenBalance) or 0
+                tokenLbl.Text = "💰 Tokens: " .. tostring(tk)
             end
             task.wait(2)
         end
@@ -297,7 +325,7 @@ local function buildGUI()
         end
     end)
 
-    -- Tombol Start/Stop Instan (FIX STUCK)
+    -- Tombol Start/Stop Instan (FIX)
     startBtn.MouseButton1Click:Connect(function()
         if isRunning then
             isRunning = false
