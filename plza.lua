@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ============================================================
--- KONFIGURASI WEBHOOK
+-- KONFIGURASI WEBHOOK (ISI LINK KAMU DI SINI)
 -- ============================================================
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1561816893323612194/DALDmkFRNtUhyDRtppD2tBMDijdIgzXPaYPp8e1RfvyBZu_hdxrJXJYZtbV5mB00b24J" 
 
@@ -60,7 +60,7 @@ local function queueWebhook(petName)
 end
 
 -- ============================================================
--- 3. CORE LOGIC (TEMBAK SAAT UID HILANG / 100% ANTI-STUCK)
+-- 3. CORE LOGIC (SMART QUEUE - 100% ANTI STUCK)
 -- ============================================================
 local function runRelistLoop()
     local typeQueues = {}
@@ -80,67 +80,72 @@ local function runRelistLoop()
         return
     end
 
-    -- 2. Inisialisasi: Ambil 1 pet per jenis untuk dipasang di booth
-    local activeListingUIDs = {}
+    local activeListingUIDs = {} 
+    local listingQueue = {}      
 
+    -- 1. Inisialisasi Awal
     for pt, queue in pairs(typeQueues) do
         local item = table.remove(queue, 1)
         if item then 
-            MAKE_LISTING:FireServer("pet", item.uid, item.price)
-            activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
-            task.wait(1.5) -- Jeda awal agar server siap
+            table.insert(listingQueue, item)
         end
     end
 
     if stateLbl then stateLbl.Text = "🟢 Memantau Inventory..." end
 
-    -- 3. Loop Pemantauan (Tembak hanya saat UID hilang)
+    -- 2. Loop Utama
     while isRunning do
-        task.wait(2) -- Cek tiap 2 detik
-        if not isRunning then break end
+        -- PROSES A: KIRIM ANTREAN SATU PER SATU
+        if #listingQueue > 0 then
+            local item = table.remove(listingQueue, 1)
+            MAKE_LISTING:FireServer("pet", item.uid, item.price)
+            activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
+            task.wait(2) 
+        else
+            -- PROSES B: PANTAU INVENTORY
+            task.wait(2)
+            local petsData = resolve(Inv.petsData)
+            if petsData then
+                local currentInventoryUIDs = {}
+                for uid in pairs(petsData) do currentInventoryUIDs[uid] = true end
 
-        local petsData = resolve(Inv.petsData)
-        if petsData then
-            local currentInventoryUIDs = {}
-            for uid in pairs(petsData) do currentInventoryUIDs[uid] = true end
+                for uid, info in pairs(activeListingUIDs) do
+                    if not currentInventoryUIDs[uid] then
+                        local pt = info.petType
+                        activeListingUIDs[uid] = nil
+                        
+                        queueWebhook(pt)
 
-            for uid, info in pairs(activeListingUIDs) do
-                if not currentInventoryUIDs[uid] then
-                    -- UID HILANG = 100% TERJUAL
-                    local pt = info.petType
-                    activeListingUIDs[uid] = nil
-                    
-                    queueWebhook(pt)
+                        local queue = typeQueues[pt]
+                        if queue and #queue > 0 then
+                            local nextItem = table.remove(queue, 1)
+                            table.insert(listingQueue, nextItem)
+                        end
+                    end
+                end
 
-                    local queue = typeQueues[pt]
-                    if queue and #queue > 0 then
-                        local nextItem = table.remove(queue, 1)
-                        MAKE_LISTING:FireServer("pet", nextItem.uid, nextItem.price)
-                        activeListingUIDs[nextItem.uid] = { petType = nextItem.petType, price = nextItem.price }
-                        task.wait(1) 
+                -- Update GUI Live Counter
+                local typeMapInventory = {}
+                local eq = resolve(Inv.equippedPetsData) or {}
+                for uid, data in pairs(petsData) do
+                    if not table.find(eq, uid) then
+                        local pt = data.petType or "Unknown"
+                        typeMapInventory[pt] = (typeMapInventory[pt] or 0) + 1
+                    end
+                end
+
+                for pt, lbl in pairs(liveLabels) do
+                    local count = typeMapInventory[pt] or 0
+                    if lbl and lbl.Parent then
+                        lbl.Text = "Sisa: " .. count
+                        lbl.TextColor3 = count == 0 and Color3.fromRGB(230, 100, 100) or Color3.fromRGB(150, 200, 255)
+                        if rowFrames[pt] then rowFrames[pt].BackgroundTransparency = count == 0 and 0.5 or 0 end
                     end
                 end
             end
-
-            -- Update GUI Live Counter
-            local typeMapInventory = {}
-            local eq = resolve(Inv.equippedPetsData) or {}
-            for uid, data in pairs(petsData) do
-                if not table.find(eq, uid) then
-                    local pt = data.petType or "Unknown"
-                    typeMapInventory[pt] = (typeMapInventory[pt] or 0) + 1
-                end
-            end
-
-            for pt, lbl in pairs(liveLabels) do
-                local count = typeMapInventory[pt] or 0
-                if lbl and lbl.Parent then
-                    lbl.Text = "Sisa: " .. count
-                    lbl.TextColor3 = count == 0 and Color3.fromRGB(230, 100, 100) or Color3.fromRGB(150, 200, 255)
-                    if rowFrames[pt] then rowFrames[pt].BackgroundTransparency = count == 0 and 0.5 or 0 end
-                end
-            end
         end
+
+        if not isRunning then break end
     end
 
     isRunning = false
@@ -216,7 +221,7 @@ local function buildGUI()
     Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 12)
     local titleText = Instance.new("TextLabel", titleBar)
     titleText.Size, titleText.Position, titleText.BackgroundTransparency = UDim2.new(1, -50, 1, 0), UDim2.new(0, 15, 0, 0), 1
-    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing (Anti-Stuck)", Color3.new(1,1,1), Enum.TextXAlignment.Left
+    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing (Smart Queue)", Color3.new(1,1,1), Enum.TextXAlignment.Left
 
     local closeBtn = Instance.new("TextButton", titleBar)
     closeBtn.Size, closeBtn.Position = UDim2.new(0, 30, 0, 30), UDim2.new(1, -38, 0, 5)
