@@ -5,8 +5,14 @@ local VirtualUser = game:GetService("VirtualUser")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local WEBHOOK_URL = "https://discord.com/api/webhooks/1561760133770645504/cfe4Ry7Zys2AmyB6bguziupMzjj3dwNwCYzBz0pcXKuklYDUGunx2KxILJXVS19Eb2B_" 
+-- ============================================================
+-- KONFIGURASI WEBHOOK
+-- ============================================================
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1561816893323612194/DALDmkFRNtUhyDRtppD2tBMDijdIgzXPaYPp8e1RfvyBZu_hdxrJXJYZtbV5mB00b24J" 
 
+-- ============================================================
+-- 1. Dependencies
+-- ============================================================
 local Inv = require(LocalPlayer.PlayerScripts.TS.ui.features.toolbar["inventory.state"])
 local MAKE_LISTING = ReplicatedStorage.rbxts_include.node_modules["@rbxts"].remo.src.container["tradePlaza.makeListing"]
 local getPlayerDataById = require(ReplicatedStorage.TS.state["player-data"]).getPlayerDataById
@@ -14,11 +20,14 @@ local DEFAULT_USER_ID = require(ReplicatedStorage.TS.constants).DEFAULT_USER_ID
 
 local function resolve(x) return typeof(x) == "function" and x() or x end
 
+-- 2. State
 local PriceByType, TypeList, isRunning = {}, {}, false
 local GUI, scrollContent, startBtn, stateLbl, tokenLbl, afkLbl
 local liveLabels, rowFrames = {}, {}
 
--- Webhook Queue
+-- ============================================================
+-- WEBHOOK QUEUE SYSTEM (Anti-Freeze)
+-- ============================================================
 local webhookQueue = {}
 local isProcessingWebhook = false
 local function processWebhookQueue()
@@ -51,12 +60,10 @@ local function queueWebhook(petName)
 end
 
 -- ============================================================
--- CORE LOGIC (GLOBAL QUEUE SYSTEM - ANTI STUCK)
+-- 3. CORE LOGIC (TEMBAK SAAT UID HILANG / 100% ANTI-STUCK)
 -- ============================================================
 local function runRelistLoop()
-    -- 1. Kumpulkan semua antrean
     local typeQueues = {}
-    local activeTypes = {}
     for _, entry in ipairs(TypeList) do
         local price = PriceByType[entry.petType]
         if price then
@@ -64,7 +71,6 @@ local function runRelistLoop()
             for _, uid in ipairs(entry.uids) do
                 table.insert(typeQueues[entry.petType], { uid = uid, petType = entry.petType, price = price })
             end
-            table.insert(activeTypes, entry.petType)
         end
     end
 
@@ -74,62 +80,67 @@ local function runRelistLoop()
         return
     end
 
-    -- 2. Global Queue: Semua pet yang mau di-list dimasukkan ke satu jalur
-    local globalQueue = {}
+    -- 2. Inisialisasi: Ambil 1 pet per jenis untuk dipasang di booth
+    local activeListingUIDs = {}
+
     for pt, queue in pairs(typeQueues) do
         local item = table.remove(queue, 1)
-        if item then table.insert(globalQueue, item) end
+        if item then 
+            MAKE_LISTING:FireServer("pet", item.uid, item.price)
+            activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
+            task.wait(1.5) -- Jeda awal agar server siap
+        end
     end
 
-    if stateLbl then stateLbl.Text = "🟢 Memproses Antrean..." end
+    if stateLbl then stateLbl.Text = "🟢 Memantau Inventory..." end
 
-    -- 3. Loop Utama
+    -- 3. Loop Pemantauan (Tembak hanya saat UID hilang)
     while isRunning do
-        -- PROSES 1: Kirim listing dari Global Queue (Maks 1 per 2 detik)
-        if #globalQueue > 0 then
-            local item = table.remove(globalQueue, 1)
-            MAKE_LISTING:FireServer("pet", item.uid, item.price)
-            task.wait(2) -- Jeda 2 detik per remote agar server tidak marah
-        else
-            -- PROSES 2: Jika queue kosong, cek inventory untuk refill
-            task.wait(2)
-            local petsData = resolve(Inv.petsData)
-            if petsData then
-                local typeMapInventory = {}
-                local eq = resolve(Inv.equippedPetsData) or {}
-                for uid, data in pairs(petsData) do
-                    if not table.find(eq, uid) then
-                        local pt = data.petType or "Unknown"
-                        typeMapInventory[pt] = (typeMapInventory[pt] or 0) + 1
-                    end
-                end
+        task.wait(2) -- Cek tiap 2 detik
+        if not isRunning then break end
 
-                -- Cek jenis mana yang butuh di-refill
-                for _, pt in ipairs(activeTypes) do
-                    local sisaDiInventory = typeMapInventory[pt] or 0
+        local petsData = resolve(Inv.petsData)
+        if petsData then
+            local currentInventoryUIDs = {}
+            for uid in pairs(petsData) do currentInventoryUIDs[uid] = true end
+
+            for uid, info in pairs(activeListingUIDs) do
+                if not currentInventoryUIDs[uid] then
+                    -- UID HILANG = 100% TERJUAL
+                    local pt = info.petType
+                    activeListingUIDs[uid] = nil
+                    
+                    queueWebhook(pt)
+
                     local queue = typeQueues[pt]
-
-                    -- Jika stok di inventory masih ada, dan di booth kosong (karena antrean global kita kosong), masukkan lagi ke global queue
-                    if sisaDiInventory > 0 and queue and #queue > 0 then
+                    if queue and #queue > 0 then
                         local nextItem = table.remove(queue, 1)
-                        table.insert(globalQueue, nextItem)
-                        queueWebhook(pt) -- Kirim notif Discord karena ini artinya pet sebelumnya sold
-                    end
-                end
-
-                -- Update GUI Live
-                for pt, lbl in pairs(liveLabels) do
-                    local count = typeMapInventory[pt] or 0
-                    if lbl and lbl.Parent then
-                        lbl.Text = "Sisa: " .. count
-                        lbl.TextColor3 = count == 0 and Color3.fromRGB(230, 100, 100) or Color3.fromRGB(150, 200, 255)
-                        if rowFrames[pt] then rowFrames[pt].BackgroundTransparency = count == 0 and 0.5 or 0 end
+                        MAKE_LISTING:FireServer("pet", nextItem.uid, nextItem.price)
+                        activeListingUIDs[nextItem.uid] = { petType = nextItem.petType, price = nextItem.price }
+                        task.wait(1) 
                     end
                 end
             end
-        end
 
-        if not isRunning then break end
+            -- Update GUI Live Counter
+            local typeMapInventory = {}
+            local eq = resolve(Inv.equippedPetsData) or {}
+            for uid, data in pairs(petsData) do
+                if not table.find(eq, uid) then
+                    local pt = data.petType or "Unknown"
+                    typeMapInventory[pt] = (typeMapInventory[pt] or 0) + 1
+                end
+            end
+
+            for pt, lbl in pairs(liveLabels) do
+                local count = typeMapInventory[pt] or 0
+                if lbl and lbl.Parent then
+                    lbl.Text = "Sisa: " .. count
+                    lbl.TextColor3 = count == 0 and Color3.fromRGB(230, 100, 100) or Color3.fromRGB(150, 200, 255)
+                    if rowFrames[pt] then rowFrames[pt].BackgroundTransparency = count == 0 and 0.5 or 0 end
+                end
+            end
+        end
     end
 
     isRunning = false
@@ -205,7 +216,7 @@ local function buildGUI()
     Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 12)
     local titleText = Instance.new("TextLabel", titleBar)
     titleText.Size, titleText.Position, titleText.BackgroundTransparency = UDim2.new(1, -50, 1, 0), UDim2.new(0, 15, 0, 0), 1
-    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing (Global Queue)", Color3.new(1,1,1), Enum.TextXAlignment.Left
+    titleText.Text, titleText.TextColor3, titleText.TextXAlignment = "🐾 Re-Listing (Anti-Stuck)", Color3.new(1,1,1), Enum.TextXAlignment.Left
 
     local closeBtn = Instance.new("TextButton", titleBar)
     closeBtn.Size, closeBtn.Position = UDim2.new(0, 30, 0, 30), UDim2.new(1, -38, 0, 5)
@@ -293,7 +304,9 @@ local function buildGUI()
     end)
 end
 
+-- ============================================================
 -- 6. Init & Auto-Scan
+-- ============================================================
 buildGUI()
 setupAntiAFK()
 
