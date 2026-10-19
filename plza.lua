@@ -32,7 +32,7 @@ local function getTokens()
     return pd.tokens or pd.currency and pd.currency.tokens or pd.tokenBalance or 0
 end
 
--- Helper: Kirim Webhook via request()
+-- Helper: Kirim Webhook (Anti-Freeze / Timeout)
 local function sendWebhook(petName)
     if WEBHOOK_URL == "" or WEBHOOK_URL:find("XXXXXX") then return end
     
@@ -52,22 +52,19 @@ local function sendWebhook(petName)
         
         local jsonData = HttpService:JSONEncode(data)
         
-        local success, response = pcall(function()
-            return request({
+        -- pcall membungkus request agar jika Discord timeout, script tidak macet
+        pcall(function()
+            request({
                 Url = WEBHOOK_URL,
                 Method = "POST",
                 Headers = {["Content-Type"] = "application/json"},
                 Body = jsonData
             })
         end)
-        
-        if not success then
-            warn("[WEBHOOK] ❌ Gagal mengirim ke Discord: " .. tostring(response))
-        end
     end)
 end
 
--- 3. Core Logic
+-- 3. Core Logic (Anti-Stuck)
 local function runRelistLoop()
     local typeQueues = {}
     for _, entry in ipairs(TypeList) do
@@ -93,7 +90,7 @@ local function runRelistLoop()
         if item then
             MAKE_LISTING:FireServer("pet", item.uid, item.price)
             activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
-            task.wait(1)
+            task.wait(0.5)
         end
     end
 
@@ -156,15 +153,12 @@ local function runRelistLoop()
 end
 
 -- ============================================================
--- 4. ANTI-AFK SYSTEM (DENGAN INDIKATOR GUI)
+-- 4. ANTI-AFK SYSTEM
 -- ============================================================
 local function setupAntiAFK()
-    -- 1. VirtualUser untuk Idle Roblox
     LocalPlayer.Idled:Connect(function()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new())
-        
-        -- Tampilkan di GUI
         if afkLbl then
             afkLbl.Text = "🛡️ Anti-AFK: Idle terdeteksi, memancing..."
             afkLbl.TextColor3 = Color3.fromRGB(255, 200, 100)
@@ -177,24 +171,20 @@ local function setupAntiAFK()
         end
     end)
 
-    -- 2. Humanoid Move untuk Game AFK Detection
     task.spawn(function()
-        while task.wait(60) do -- Setiap 1 menit
+        while task.wait(60) do
             local char = LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if hum then
-                -- Tampilkan di GUI
                 if afkLbl then
                     afkLbl.Text = "🛡️ Anti-AFK: Memancing aktivitas..."
                     afkLbl.TextColor3 = Color3.fromRGB(255, 200, 100)
                 end
                 
-                -- Lakukan pergerakan
                 hum:Move(Vector3.new(1, 0, 0), true)
                 task.wait(0.2)
                 hum:Move(Vector3.new(0, 0, 0), false)
                 
-                -- Kembalikan teks setelah selesai
                 task.delay(3, function()
                     if afkLbl and afkLbl.Parent then
                         afkLbl.Text = "🛡️ Anti-AFK: Aktif (Siap)"
@@ -241,19 +231,16 @@ local function buildGUI()
     local topBar = Instance.new("Frame", main)
     topBar.Size, topBar.Position, topBar.BackgroundTransparency = UDim2.new(1, -20, 0, 160), UDim2.new(0, 10, 0, 45), 1
 
-    -- Status Re-Listing
     stateLbl = Instance.new("TextLabel", topBar)
     stateLbl.Size, stateLbl.BackgroundTransparency, stateLbl.Text = UDim2.new(1, 0, 0, 22), 1, "⏳ Idle"
     stateLbl.TextColor3, stateLbl.TextXAlignment = Color3.fromRGB(200, 200, 200), Enum.TextXAlignment.Left
 
-    -- Status Anti-AFK
     afkLbl = Instance.new("TextLabel", topBar)
     afkLbl.Size, afkLbl.Position, afkLbl.BackgroundTransparency = UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 0, 24), 1
     afkLbl.Text, afkLbl.TextColor3 = "🛡️ Anti-AFK: Aktif (Siap)", Color3.fromRGB(150, 255, 150)
     afkLbl.TextXAlignment = Enum.TextXAlignment.Left
     afkLbl.Font = Enum.Font.GothamBold
 
-    -- Token Label
     tokenLbl = Instance.new("TextLabel", topBar)
     tokenLbl.Size, tokenLbl.Position, tokenLbl.BackgroundTransparency = UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 0, 48), 1
     tokenLbl.Text, tokenLbl.TextColor3 = "💰 Tokens: 0", Color3.fromRGB(100, 255, 100)
@@ -294,6 +281,7 @@ local function buildGUI()
     Instance.new("UIPadding", scroll).PaddingTop, Instance.new("UIPadding", scroll).PaddingLeft = UDim.new(0, 4), UDim.new(0, 4)
 
     toggle.MouseButton1Click:Connect(function() main.Visible = not main.Visible end)
+    
     setAllBtn.MouseButton1Click:Connect(function()
         local n = tonumber(bulkBox.Text) or 100
         for _, entry in ipairs(TypeList) do PriceByType[entry.petType] = n end
@@ -309,9 +297,13 @@ local function buildGUI()
         end
     end)
 
+    -- Tombol Start/Stop Instan (FIX STUCK)
     startBtn.MouseButton1Click:Connect(function()
         if isRunning then
             isRunning = false
+            startBtn.Text = "🔥 Mulai Re-Listing"
+            startBtn.BackgroundColor3 = Color3.fromRGB(60, 170, 90)
+            if stateLbl then stateLbl.Text = "⏹️ Menghentikan..." end
         else
             isRunning = true
             startBtn.Text = "⏹️ Stop"
@@ -325,7 +317,7 @@ end
 -- 6. Init & Auto-Scan
 -- ============================================================
 buildGUI()
-setupAntiAFK() -- Panggil Anti-AFK setelah GUI dibuat agar indikatornya muncul
+setupAntiAFK()
 
 task.spawn(function()
     while GUI and GUI.Parent do
