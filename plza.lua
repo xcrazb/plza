@@ -100,10 +100,10 @@ local function runRelistLoop()
             local item = table.remove(listingQueue, 1)
             MAKE_LISTING:FireServer("pet", item.uid, item.price)
             activeListingUIDs[item.uid] = { petType = item.petType, price = item.price }
-            task.wait(2) 
+            task.wait(3) 
         else
             -- PROSES B: PANTAU INVENTORY
-            task.wait(2)
+            task.wait(3)
             local petsData = resolve(Inv.petsData)
             if petsData then
                 local currentInventoryUIDs = {}
